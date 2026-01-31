@@ -1,0 +1,16 @@
+{
+  "name": "molt-lens-skills",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lens:post": "node skills/lens-post/post.mjs"
+  },
+  "dependencies": {
+    "@lens-chain/sdk": "^1.0.0",
+    "@lens-chain/storage-client": "^1.0.0",
+    "@lens-protocol/client": "0.0.0-canary-20250820102520",
+    "@lens-protocol/metadata": "2.1.0",
+    "dotenv": "^16.4.5",
+    "viem": "^2.21.0"
+  }
+}
