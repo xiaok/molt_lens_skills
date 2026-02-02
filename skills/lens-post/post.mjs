@@ -1,13 +1,15 @@
 import "dotenv/config";
 
 import { PublicClient, evmAddress, mainnet, testnet, uri } from "@lens-protocol/client";
-import { fetchAccountsAvailable, post } from "@lens-protocol/client/actions";
+import { fetchAccountsAvailable, fetchGroup, joinGroup, post } from "@lens-protocol/client/actions";
 import { handleOperationWith, signMessageWith } from "@lens-protocol/client/viem";
 import { textOnly } from "@lens-protocol/metadata";
 import { StorageClient, immutable } from "@lens-chain/storage-client";
 import { chains } from "@lens-chain/sdk/viem";
 import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+
+const BOT_GROUP_ADDRESS = "0x27b4bF05461c88d08D640C4bF56a9378F986f9bD";
 
 function parseArgs(argv) {
   const args = {
@@ -17,6 +19,8 @@ function parseArgs(argv) {
     origin: "https://openclaw.local",
     app: null,
     account: null,
+    feed: null,
+    group: BOT_GROUP_ADDRESS,
     publish: false,
     dryRun: true,
   };
@@ -47,6 +51,14 @@ function parseArgs(argv) {
         break;
       case "--account":
         args.account = argv[index + 1] ?? null;
+        index += 1;
+        break;
+      case "--feed":
+        args.feed = argv[index + 1] ?? null;
+        index += 1;
+        break;
+      case "--group":
+        args.group = argv[index + 1] ?? BOT_GROUP_ADDRESS;
         index += 1;
         break;
       case "--publish":
@@ -83,6 +95,8 @@ function printHelp() {
     "  --origin <url>            Origin header for Lens login (Node needs this)",
     "  --app <0x...>             Optional Lens App address (if your login requires it)",
     "  --account <0x...>         Optional Lens Account address (auto-detected if omitted)",
+    "  --feed <0x...>            Post to a custom Feed address (advanced)",
+    `  --group <0x...>           Post into a Group (default: ${BOT_GROUP_ADDRESS})`,
     "  --dry-run                 Print what would happen (default)",
     "  --publish                 Actually broadcast the post",
     "",
@@ -108,6 +122,50 @@ function resolveEnvironment(name) {
       return { lens: testnet, chain: chains.testnet };
     default:
       throw new Error(`Unknown environment: ${name} (expected mainnet|testnet)`);
+  }
+}
+
+async function resolveGroupFeedAddress(client, groupAddress) {
+  const groupResult = await fetchGroup(client, { group: evmAddress(groupAddress) });
+
+  if (groupResult.isErr()) {
+    throw new Error(`fetchGroup failed: ${groupResult.error}`);
+  }
+
+  const group = groupResult.value;
+  if (!group) {
+    throw new Error(`Group not found: ${groupAddress}`);
+  }
+
+  const feedAddress = group?.feed?.address;
+  if (!feedAddress) {
+    throw new Error(`Group has no feed configured: ${groupAddress}`);
+  }
+
+  return { feedAddress, group };
+}
+
+async function ensureGroupMembership(sessionClient, walletClient, groupAddress) {
+  const result = await fetchGroup(sessionClient, { group: evmAddress(groupAddress) });
+
+  if (result.isErr()) {
+    throw new Error(`fetchGroup failed: ${result.error}`);
+  }
+
+  const group = result.value;
+  if (!group) {
+    throw new Error(`Group not found: ${groupAddress}`);
+  }
+
+  const isMember = Boolean(group?.operations?.isMember);
+  if (isMember) return;
+
+  const joinResult = await joinGroup(sessionClient, { group: evmAddress(groupAddress) })
+    .andThen(handleOperationWith(walletClient))
+    .andThen(sessionClient.waitForTransaction);
+
+  if (joinResult.isErr()) {
+    throw new Error(`joinGroup failed: ${joinResult.error}`);
   }
 }
 
@@ -154,6 +212,14 @@ async function main() {
     throw new Error("Provide --content or --content-uri");
   }
 
+  if (args.publish && args.feed) {
+    throw new Error("For bot safety, do not use --feed; use --group instead.");
+  }
+
+  if (args.publish && !args.group) {
+    throw new Error("For bot safety, a target --group is required.");
+  }
+
   const { lens, chain } = resolveEnvironment(args.environment);
 
   const account = privateKeyToAccount(privateKey);
@@ -187,6 +253,10 @@ async function main() {
           note: appAddress ? null : "No --app provided; login will omit app.",
           willUploadMetadata: Boolean(args.content && !args.contentUri),
           willPublish: false,
+          target: {
+            group: args.group,
+            feed: args.feed,
+          },
           metadata,
           contentUri: args.contentUri ?? null,
         },
@@ -226,7 +296,24 @@ async function main() {
     contentUri = uploaded.uri;
   }
 
-  const postResult = await post(sessionClient, { contentUri: uri(contentUri) });
+  let targetFeedAddress = args.feed;
+  const targetGroupAddress = args.group;
+
+  if (targetGroupAddress) {
+    await ensureGroupMembership(sessionClient, walletClient, targetGroupAddress);
+  }
+
+  if (!targetFeedAddress && targetGroupAddress) {
+    const resolved = await resolveGroupFeedAddress(client, targetGroupAddress);
+    targetFeedAddress = resolved.feedAddress;
+  }
+
+  const postRequest = {
+    contentUri: uri(contentUri),
+    ...(targetFeedAddress ? { feed: evmAddress(targetFeedAddress) } : {}),
+  };
+
+  const postResult = await post(sessionClient, postRequest);
 
   if (postResult.isErr()) {
     throw new Error(`Post request failed: ${postResult.error}`);
